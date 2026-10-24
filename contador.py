@@ -61,6 +61,7 @@ BASE_URL = URLS.get(PC, "https://camaras.cimbrapp.work")  # PC desconocida -> ac
 INTERVAL_S = 15
 CONF = 0.35              # umbral de confianza (original en 0.4)
 MODEL = "yolo11n.pt"    # en el server con GPU probar yolo11s.pt / yolo11m.pt
+MODEL = "yolo11m.pt"    # falsos positivos en el otro, probamos con este
 
 # Carpeta de salida según la PC
 CARPETA = "contador_personas_streams"
@@ -179,7 +180,7 @@ def main():
         ok = [(c, f) for c, f in zip(cams, frames) if f is not None]
 
         if ok:
-            results = model.predict([f for _, f in ok], classes=[0], conf=CONF, verbose=False)
+            results = model.predict([f for _, f in ok], classes=[0], conf=CONF, imgsz=1280, verbose=False)
             now = datetime.now().isoformat(timespec="seconds")
 
             for (cam, frame), res in zip(ok, results):
