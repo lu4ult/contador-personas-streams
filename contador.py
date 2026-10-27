@@ -24,6 +24,7 @@ from datetime import datetime
 from urllib.parse import urljoin
 
 import cv2
+import psutil
 import requests
 from ultralytics import YOLO
 
@@ -58,10 +59,13 @@ BASE_URL = URLS.get(PC, "https://camaras.cimbrapp.work")  # PC desconocida -> ac
 # ============================================================
 # CONFIG
 # ============================================================
-INTERVAL_S = 15
+INTERVAL_S = 30
+MIN_SLEEP_S = 5          # descanso mínimo entre ciclos aunque la inferencia tarde más de INTERVAL_S
+BATCH = 4                # cuántas cámaras se procesan juntas en cada predict (evita picos de VRAM/RAM)
 CONF = 0.35              # umbral de confianza (original en 0.4)
 MODEL = "yolo11n.pt"    # en el server con GPU probar yolo11s.pt / yolo11m.pt
 MODEL = "yolo11m.pt"    # falsos positivos en el otro, probamos con este
+IMGSZ = 1280             # si sigue pesado, bajar a 960
 
 # Carpeta de salida según la PC
 CARPETA = "contador_personas_streams"
@@ -162,6 +166,13 @@ def guardar_frame(img, dst):
 # ============================================================
 def main():
     print(f"PC: {PC} | URL: {BASE_URL} | Salida: {OUT_DIR}")
+
+    # Prioridad baja: que no le saque CPU a main.js / ffmpeg / acceso remoto
+    try:
+        psutil.Process().nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+    except Exception as e:
+        print(f"No pude bajar la prioridad: {e}")
+
     os.makedirs(f"{OUT_DIR}/frames", exist_ok=True)
     model = YOLO(MODEL)
     counts = {}  # mac -> cantidad; si una cámara falla conserva su último valor
@@ -180,7 +191,11 @@ def main():
         ok = [(c, f) for c, f in zip(cams, frames) if f is not None]
 
         if ok:
-            results = model.predict([f for _, f in ok], classes=[0], conf=CONF, imgsz=1280, verbose=False)
+            # Inferencia en tandas chicas para no disparar el uso de VRAM/RAM
+            results = []
+            for i in range(0, len(ok), BATCH):
+                chunk = [f for _, f in ok[i:i + BATCH]]
+                results += model.predict(chunk, classes=[0], conf=CONF, imgsz=IMGSZ, verbose=False)
             now = datetime.now().isoformat(timespec="seconds")
 
             for (cam, frame), res in zip(ok, results):
@@ -193,7 +208,7 @@ def main():
             replace_con_reintentos(tmp, f"{OUT_DIR}/counts.json")
 
         print(f"{len(ok)}/{len(cams)} cámaras OK en {time.time() - t0:.1f}s")
-        time.sleep(max(0, INTERVAL_S - (time.time() - t0)))
+        time.sleep(max(MIN_SLEEP_S, INTERVAL_S - (time.time() - t0)))
 
 
 if __name__ == "__main__":
