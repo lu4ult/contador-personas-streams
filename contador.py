@@ -7,8 +7,8 @@ Cada INTERVAL_S segundos, por cada cámara de list.json:
   3. corre YOLO (solo clase "person") y cuenta las detecciones
 
 Salidas en OUT_DIR:
-  counts.json      {"ts": timestamp global, "counts": {mac: cantidad}}
-  frames/<mac>.jpg último frame con las cajas dibujadas
+    counts.json      {"ts": ..., "counts": {mac: cantidad (mediana)}, "lastCeroPeople": {mac: fecha en que pasó a 0}}
+    frames/<mac>.jpg último frame con las cajas dibujadas
 
 Uso:
   pip install ultralytics requests
@@ -22,6 +22,9 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from urllib.parse import urljoin
+
+import statistics
+from collections import defaultdict, deque
 
 import cv2
 import psutil
@@ -61,11 +64,24 @@ BASE_URL = URLS.get(PC, "https://camaras.cimbrapp.work")  # PC desconocida -> ac
 # ============================================================
 INTERVAL_S = 30
 MIN_SLEEP_S = 5          # descanso mínimo entre ciclos aunque la inferencia tarde más de INTERVAL_S
-BATCH = 4                # cuántas cámaras se procesan juntas en cada predict (evita picos de VRAM/RAM)
+# BATCH = 4                # cuántas cámaras se procesan juntas en cada predict (evita picos de VRAM/RAM)
 CONF = 0.35              # umbral de confianza (original en 0.4)
-MODEL = "yolo11n.pt"    # en el server con GPU probar yolo11s.pt / yolo11m.pt
-MODEL = "yolo11m.pt"    # falsos positivos en el otro, probamos con este
+# MODEL = "yolo11n.pt"    # en el server con GPU probar yolo11s.pt / yolo11m.pt
+# MODEL = "yolo11m.pt"    # falsos positivos en el otro, probamos con este
 IMGSZ = 1280             # si sigue pesado, bajar a 960
+VENTANA = 3   # cantidad de ciclos que entran en la mediana
+
+# En CONFIG, reemplazando MODEL / BATCH
+if PC == "PROD-CRIANZA":
+    MODEL, DEVICE, BATCH = "yolo11m_openvino_model/", "intel:gpu", 1
+else:
+    MODEL, DEVICE, BATCH = "yolo11m.pt", None, 4
+
+# Zonas a ignorar por cámara, en fracciones del frame (x1, y1, x2, y2) entre 0 y 1
+IGNORAR = {
+    # Patio, por espantapájaros
+    "04-EE-CD-66-FF-2B": [(0.59, 0.08, 0.66, 0.28)],
+}
 
 # Carpeta de salida según la PC
 CARPETA = "contador_personas_streams"
@@ -115,9 +131,16 @@ def grab_frame(cam):
 # ============================================================
 # DIBUJO DE CAJAS (solo confianza, sin el nombre de la clase)
 # ============================================================
-def draw_boxes(frame, res):
+
+def ignorada(box, mac, w, h):
+    cx = (box.xyxy[0][0] + box.xyxy[0][2]).item() / 2 / w
+    cy = (box.xyxy[0][1] + box.xyxy[0][3]).item() / 2 / h
+    return any(x1 <= cx <= x2 and y1 <= cy <= y2 for x1, y1, x2, y2 in IGNORAR.get(mac, []))
+
+
+def draw_boxes(frame, boxes):
     img = frame.copy()
-    for box in res.boxes:
+    for box in boxes:
         x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
         label = f"{float(box.conf[0]):.2f}"
 
@@ -176,6 +199,14 @@ def main():
     os.makedirs(f"{OUT_DIR}/frames", exist_ok=True)
     model = YOLO(MODEL)
     counts = {}  # mac -> cantidad; si una cámara falla conserva su último valor
+    historial = defaultdict(lambda: deque(maxlen=VENTANA))  # mac -> últimos conteos
+    
+    last_cero = {}
+    try:  # retomar los valores si se reinicia el script
+        with open(f"{OUT_DIR}/counts.json", encoding="utf-8") as f:
+            last_cero = json.load(f).get("lastCeroPeople", {})
+    except Exception:
+        pass
 
     while True:
         t0 = time.time()
@@ -195,16 +226,36 @@ def main():
             results = []
             for i in range(0, len(ok), BATCH):
                 chunk = [f for _, f in ok[i:i + BATCH]]
-                results += model.predict(chunk, classes=[0], conf=CONF, imgsz=IMGSZ, verbose=False)
+                results += model.predict(chunk, classes=[0], conf=CONF, imgsz=IMGSZ, device=DEVICE, verbose=False)
             now = datetime.now().isoformat(timespec="seconds")
 
             for (cam, frame), res in zip(ok, results):
-                counts[cam["mac"]] = len(res.boxes)
-                guardar_frame(draw_boxes(frame, res), f"{OUT_DIR}/frames/{cam['mac']}.jpg")
+                h, w = frame.shape[:2]
+
+                # TEMPORAL: imprime las coordenadas de cada detección para calibrar IGNORAR
+                # for b in res.boxes:
+                #     x1, y1, x2, y2 = b.xyxy[0].tolist()
+                #     print(f"[{cam['name']}] {cam['mac']} conf={float(b.conf[0]):.2f} -> ({x1/w:.2f}, {y1/h:.2f}, {x2/w:.2f}, {y2/h:.2f})")
+
+                boxes = [b for b in res.boxes if not ignorada(b, cam["mac"], w, h)]
+                historial[cam["mac"]].append(len(boxes))
+                n = statistics.median_low(historial[cam["mac"]])
+
+                prev = counts.get(cam["mac"])
+                if n == 0 and ((prev or 0) > 0 or cam["mac"] not in last_cero):
+                    last_cero[cam["mac"]] = now   # acaba de pasar a cero
+                counts[cam["mac"]] = n
+
+                img = draw_boxes(frame, boxes)
+                for x1, y1, x2, y2 in IGNORAR.get(cam["mac"], []):
+                    p1 = (int(x1 * w), int(y1 * h))
+                    cv2.rectangle(img, p1, (int(x2 * w), int(y2 * h)), (0, 0, 255), 2)
+                    cv2.putText(img, "ignorado", (p1[0], max(p1[1] - 6, 12)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
+                guardar_frame(img, f"{OUT_DIR}/frames/{cam['mac']}.jpg")
 
             tmp = f"{OUT_DIR}/counts.json.tmp"
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump({"ts": now, "counts": counts}, f, ensure_ascii=False, indent=2)
+                json.dump({"ts": now, "counts": counts, "lastCeroPeople": last_cero}, f, ensure_ascii=False, indent=2)
             replace_con_reintentos(tmp, f"{OUT_DIR}/counts.json")
 
         print(f"{len(ok)}/{len(cams)} cámaras OK en {time.time() - t0:.1f}s")
