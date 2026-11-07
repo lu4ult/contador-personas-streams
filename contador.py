@@ -80,7 +80,9 @@ else:
 # Zonas a ignorar por cámara, en fracciones del frame (x1, y1, x2, y2) entre 0 y 1
 IGNORAR = {
     # Patio, por espantapájaros
-    "04-EE-CD-66-FF-2B": [(0.59, 0.08, 0.66, 0.28)],
+    # "04-EE-CD-66-FF-2B": [(0.59, 0.08, 0.66, 0.28)],
+    # Administración, cuadro Fede
+    "B4-A3-82-5F-13-84": [(0.09, 0.71, 0.17, 0.92)]
 }
 
 # Carpeta de salida según la PC
@@ -200,7 +202,7 @@ def main():
     model = YOLO(MODEL)
     counts = {}  # mac -> cantidad; si una cámara falla conserva su último valor
     historial = defaultdict(lambda: deque(maxlen=VENTANA))  # mac -> últimos conteos
-    
+
     last_cero = {}
     try:  # retomar los valores si se reinicia el script
         with open(f"{OUT_DIR}/counts.json", encoding="utf-8") as f:
