@@ -85,6 +85,11 @@ IGNORAR = {
     "B4-A3-82-5F-13-84": [(0.09, 0.71, 0.17, 0.92)]
 }
 
+# Cámaras que no se analizan
+EXCLUIR = {
+    "B4-A3-82-5F-13-84",  # Administracion
+}
+
 # Carpeta de salida según la PC
 CARPETA = "contador_personas_streams"
 BASES = {
@@ -218,6 +223,8 @@ def main():
             print(f"No pude leer list.json: {e}")
             time.sleep(INTERVAL_S)
             continue
+
+        cams = [c for c in cams if c["mac"] not in EXCLUIR]
 
         with ThreadPoolExecutor(max_workers=10) as ex:
             frames = list(ex.map(grab_frame, cams))
